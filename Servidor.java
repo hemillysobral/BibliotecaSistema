@@ -16,6 +16,7 @@ public class Servidor {
         int port = (portEnv != null) ? Integer.parseInt(portEnv) : 8080;
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
+        // Páginas HTML
         server.createContext("/", exchange -> servirArquivo(exchange, "index.html"));
         server.createContext("/cadastraraluno.html", exchange -> servirArquivo(exchange, "cadastraraluno.html"));
         server.createContext("/cadastrarlivro.html", exchange -> servirArquivo(exchange, "cadastrarlivro.html"));
@@ -26,6 +27,17 @@ public class Servidor {
         server.createContext("/livros-emprestados.html", Servidor::listarEmprestimos);
         server.createContext("/livros-atrasados.html", Servidor::listarAtrasados);
 
+        // Estático
+        server.createContext("/style.css", exchange -> {
+            byte[] bytes = Files.readAllBytes(Paths.get("style.css"));
+            exchange.getResponseHeaders().set("Content-Type", "text/css; charset=UTF-8");
+            exchange.sendResponseHeaders(200, bytes.length);
+            OutputStream os = exchange.getResponseBody();
+            os.write(bytes);
+            os.close();
+        });
+
+        // Ações POST
         server.createContext("/cadastrar-aluno", Servidor::cadastrarAluno);
         server.createContext("/cadastrar-livro", Servidor::cadastrarLivro);
         server.createContext("/emprestar-livro", Servidor::registrarEmprestimo);
@@ -60,12 +72,29 @@ public class Servidor {
     static void registrarEmprestimo(HttpExchange exchange) throws IOException {
         if (exchange.getRequestMethod().equalsIgnoreCase("POST")) {
             Map<String, String> dados = lerFormulario(exchange);
+
+            // Verificação de existência
+            boolean alunoExiste = alunos.stream().anyMatch(a -> a.matricula.equals(dados.get("matricula")));
+            Livro livroSelecionado = livros.stream().filter(l -> l.titulo.equals(dados.get("titulo"))).findFirst().orElse(null);
+
+            if (!alunoExiste || livroSelecionado == null) {
+                responder(exchange, "Erro: aluno ou livro não encontrado.");
+                return;
+            }
+
+            if (livroSelecionado.quantidade <= 0) {
+                responder(exchange, "Erro: livro indisponível para empréstimo.");
+                return;
+            }
+
             try {
                 SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
                 Date dataEmprestimo = sdf.parse(dados.get("dataEmprestimo"));
                 Date dataDevolucao = sdf.parse(dados.get("dataDevolucao"));
 
                 emprestimos.add(new Emprestimo(dados.get("matricula"), dados.get("titulo"), dataEmprestimo, dataDevolucao, false));
+                livroSelecionado.quantidade--; // Reduz quantidade disponível
+
                 redirecionar(exchange, "/livros-emprestados.html");
             } catch (Exception e) {
                 responder(exchange, "Erro ao registrar empréstimo: " + e.getMessage());
@@ -76,9 +105,16 @@ public class Servidor {
     static void registrarDevolucao(HttpExchange exchange) throws IOException {
         if (exchange.getRequestMethod().equalsIgnoreCase("POST")) {
             Map<String, String> dados = lerFormulario(exchange);
+
             for (Emprestimo e : emprestimos) {
                 if (!e.devolvido && e.matricula.equals(dados.get("matricula")) && e.titulo.equals(dados.get("titulo"))) {
                     e.devolvido = true;
+                    for (Livro l : livros) {
+                        if (l.titulo.equals(e.titulo)) {
+                            l.quantidade++; // Aumenta quantidade
+                            break;
+                        }
+                    }
                     break;
                 }
             }
@@ -90,8 +126,7 @@ public class Servidor {
         StringBuilder html = new StringBuilder(cabecalhoHtml("Lista de Alunos", "fa-user-graduate"));
         html.append("<ul>");
         for (Aluno a : alunos) {
-            html.append("<li>").append(a.nome).append(" - ")
-                .append(a.matricula).append(" (").append(a.turma).append(")</li>");
+            html.append("<li>").append(a.nome).append(" - ").append(a.matricula).append(" (").append(a.turma).append(")</li>");
         }
         html.append("</ul>").append(botaoVoltar()).append(rodapeHtml());
         responder(exchange, html.toString());
@@ -138,65 +173,83 @@ public class Servidor {
         responder(exchange, html.toString());
     }
 
+    // Utilitários
     static String cabecalhoHtml(String titulo, String icone) {
-        return """
-        <!DOCTYPE html>
-        <html lang="pt-br">
-        <head>
-            <meta charset="UTF-8">
-            <title>%s</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-            <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-        </head>
-        <body class="container mt-5">
-        <h2 class="mb-4"><i class="fas %s"></i> %s</h2>
-        """.formatted(titulo, icone, titulo);
-    }
-
-    static String botaoVoltar() {
-        return "<a href='/' class='btn btn-secondary mt-3'><i class='fas fa-arrow-left'></i> Voltar</a>";
+        return "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>" + titulo + "</title>" +
+               "<link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css'>" +
+               "<link rel='stylesheet' href='https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css'>" +
+               "<link rel='stylesheet' href='/style.css'></head><body class='container py-4'>" +
+               "<h1 class='mb-4'><i class='fa " + icone + "'></i> " + titulo + "</h1>";
     }
 
     static String rodapeHtml() {
         return "</body></html>";
     }
 
-    static Map<String, String> lerFormulario(HttpExchange exchange) throws IOException {
-        InputStreamReader isr = new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8);
-        BufferedReader reader = new BufferedReader(isr);
-        String formData = reader.readLine();
+    static String botaoVoltar() {
+        return "<a href='/' class='btn btn-secondary mt-3'><i class='fa fa-home'></i> Voltar ao Menu</a>";
+    }
 
-        Map<String, String> params = new HashMap<>();
+    static Map<String, String> lerFormulario(HttpExchange exchange) throws IOException {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8));
+        String formData = reader.readLine();
+        Map<String, String> map = new HashMap<>();
         if (formData != null) {
-            String[] pares = formData.split("&");
-            for (String par : pares) {
-                String[] chaveValor = par.split("=");
-                if (chaveValor.length == 2) {
-                    String chave = URLDecoder.decode(chaveValor[0], StandardCharsets.UTF_8);
-                    String valor = URLDecoder.decode(chaveValor[1], StandardCharsets.UTF_8);
-                    params.put(chave, valor);
+            for (String pair : formData.split("&")) {
+                String[] parts = pair.split("=");
+                if (parts.length == 2) {
+                    map.put(URLDecoder.decode(parts[0], "UTF-8"), URLDecoder.decode(parts[1], "UTF-8"));
                 }
             }
         }
-        return params;
+        return map;
     }
 
-    static void responder(HttpExchange exchange, String response) throws IOException {
+    static void redirecionar(HttpExchange exchange, String caminho) throws IOException {
+        exchange.getResponseHeaders().set("Location", caminho);
+        exchange.sendResponseHeaders(302, -1);
+        exchange.close();
+    }
+
+    static void responder(HttpExchange exchange, String html) throws IOException {
+        byte[] bytes = html.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
-        byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(200, bytes.length);
         OutputStream os = exchange.getResponseBody();
         os.write(bytes);
         os.close();
     }
 
-    static void redirecionar(HttpExchange exchange, String url) throws IOException {
-        exchange.getResponseHeaders().set("Location", url);
-        exchange.sendResponseHeaders(302, -1);
-        exchange.close();
-    }
-
+    // Classes internas
     static class Aluno {
         String nome, matricula, turma;
         Aluno(String nome, String matricula, String turma) {
-           
+            this.nome = nome;
+            this.matricula = matricula;
+            this.turma = turma;
+        }
+    }
+
+    static class Livro {
+        String titulo, autor;
+        int quantidade;
+        Livro(String titulo, String autor, int quantidade) {
+            this.titulo = titulo;
+            this.autor = autor;
+            this.quantidade = quantidade;
+        }
+    }
+
+    static class Emprestimo {
+        String matricula, titulo;
+        Date dataEmprestimo, dataDevolucao;
+        boolean devolvido;
+        Emprestimo(String matricula, String titulo, Date dataEmprestimo, Date dataDevolucao, boolean devolvido) {
+            this.matricula = matricula;
+            this.titulo = titulo;
+            this.dataEmprestimo = dataEmprestimo;
+            this.dataDevolucao = dataDevolucao;
+            this.devolvido = devolvido;
+        }
+    }
+}
